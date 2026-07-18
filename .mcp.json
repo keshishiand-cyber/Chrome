@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "Airbyte": {
+      "type": "http",
+      "url": "https://mcp.airbyte.ai/mcp"
+    }
+  }
+}
