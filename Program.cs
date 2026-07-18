@@ -11,7 +11,7 @@ if (string.IsNullOrEmpty(apiKey))
 }
 
 ChatClient chatClient = new(model: "gpt-4o-mini", apiKey: apiKey);
-ImageClient imageClient = new(model: "dall-e-3", apiKey: apiKey);
+ImageClient imageClient = new(model: "gpt-image-1", apiKey: apiKey);
 
 Console.WriteLine("Chat with OpenAI (type 'exit' to quit, or '/image <prompt>' to generate an image)");
 while (true)
@@ -29,7 +29,6 @@ while (true)
         ImageGenerationOptions options = new()
         {
             Size = GeneratedImageSize.W1024xH1024,
-            ResponseFormat = GeneratedImageFormat.Bytes,
         };
 
         GeneratedImage image = imageClient.GenerateImage(imagePrompt, options);
