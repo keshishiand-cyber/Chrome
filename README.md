@@ -8,29 +8,45 @@ using free generation backends wherever one genuinely exists.
 ### Images — free, no key at all
 
 `/image <prompt>` uses the unauthenticated
-[Pollinations.ai](https://pollinations.ai) image API. No signup, no key, no cost.
-Works with no environment variables set.
+[Pollinations.ai](https://pollinations.ai) image API. No signup, no key, no cost, no
+practical limit. Works with no environment variables set.
 
-### Video — free, but needs a free Hugging Face token
+### Video — free, but heavily rate limited
 
-`/video <prompt>` generates a starting frame on Pollinations (free), then animates it
-with the [Wan 2.2 image-to-video Space](https://huggingface.co/spaces/zerogpu-aoti/wan2-2-fp8da-aoti-faster)
-on Hugging Face's free **ZeroGPU** tier.
+`/video <prompt>` runs a text-to-video model on a Hugging Face
+[ZeroGPU](https://huggingface.co/docs/hub/spaces-zerogpu) Space. No payment is involved,
+but ZeroGPU rejects anonymous API calls, so you need a free token:
 
-No payment is ever involved, but ZeroGPU rejects anonymous API calls, so you need a token:
-
-1. Create a free token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read scope is enough).
+1. Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read scope is enough).
 2. `export HF_TOKEN=hf_...`
 
-Free ZeroGPU quota is time-based and refills; if you exhaust it, `/video` says so and you
-wait rather than pay. Generation takes a few minutes.
+**Be aware of the real limits before relying on this.** ZeroGPU grants a free account
+**5 minutes of GPU per day**, and current video models request **200–300 seconds for a
+single clip**. One generation can consume most or all of a day's allowance, and requests
+are rejected outright when the remaining budget is too small. Free accounts also get
+medium queue priority, so a clip can sit in the queue for a long time. When quota runs
+out the app prints Hugging Face's own message, including when the allowance refills:
+
+```
+Video generation failed: You have exceeded your free ZeroGPU quota
+(200s requested vs. 294s left). Try again in 23:46:30.
+```
+
+Community Spaces also break fairly often (missing model weights, app-side exceptions), so
+you can point the app at a different one:
+
+```
+export HF_VIDEO_SPACE=Phamthihong/LTX-2.3-turbo   # default: JoseAQ/Video_Action
+```
+
+The Space must expose a `generate_video` endpoint with the LTX-2.3 parameter signature.
 
 ### Video fallback — paid
 
 If `HF_TOKEN` isn't set but `POLLINATIONS_API_KEY` is, `/video` falls back to
 [gen.pollinations.ai](https://gen.pollinations.ai) video models (Veo, Seedance, Wan).
-This costs Pollen credits (roughly 0.4 Pollen per short clip); a free registered account
-receives only about 1.5 Pollen/week, so this is effectively a paid path.
+This costs Pollen credits — roughly 0.4 Pollen per short clip, while a free registered
+account receives only about 1.5 Pollen/week. Treat it as a paid path.
 
 ### Chat — needs an OpenAI key
 

@@ -58,7 +58,7 @@ while (true)
             string fileName;
             if (!string.IsNullOrEmpty(hfToken))
             {
-                Console.WriteLine("Generating a starting frame, then animating it on Hugging Face ZeroGPU (free, may take a few minutes)...");
+                Console.WriteLine("Generating on Hugging Face ZeroGPU (free, but queues can take several minutes)...");
                 fileName = await GenerateFreeVideoAsync(httpClient, videoPrompt, hfToken);
             }
             else if (!string.IsNullOrEmpty(pollinationsApiKey))
@@ -108,52 +108,55 @@ static async Task<string> GenerateFreeImageAsync(HttpClient httpClient, string p
     return fileName;
 }
 
-// Free text-to-video: Pollinations paints the first frame (no key), then the Wan 2.2
-// image-to-video Space animates it on Hugging Face's free ZeroGPU tier. ZeroGPU rejects
-// anonymous API calls, so a free HF token is required — but no payment is ever involved.
-static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string prompt, string hfToken, double durationSeconds = 3.5)
+// Free text-to-video on Hugging Face's ZeroGPU tier. No payment is ever involved, but
+// ZeroGPU rejects anonymous API calls, so a free HF token is required.
+//
+// This talks Gradio's queue protocol (/queue/join + /queue/data) rather than the simpler
+// /gradio_api/call/ REST route, because the REST route reports every failure as a bare
+// "null" while the queue stream carries the real message — including the ZeroGPU quota
+// notice that says how long until your allowance refills.
+static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string prompt, string hfToken, double durationSeconds = 6.0)
 {
-    const string spaceHost = "https://zerogpu-aoti-wan2-2-fp8da-aoti-faster.hf.space";
-    const string endpoint = "/gradio_api/call/generate_video";
+    string space = Environment.GetEnvironmentVariable("HF_VIDEO_SPACE") ?? "JoseAQ/Video_Action";
+    string spaceHost = $"https://{ToSpaceSubdomain(space)}.hf.space";
 
-    var startingFrame = new Dictionary<string, object?>
-    {
-        ["path"] = null,
-        ["url"] = BuildPollinationsImageUrl(prompt, 832, 480),
-        ["meta"] = new Dictionary<string, string> { ["_type"] = "gradio.FileData" },
-    };
+    int functionIndex = await ResolveFunctionIndexAsync(httpClient, spaceHost, "generate_video");
+    string sessionHash = Guid.NewGuid().ToString("n")[..12];
 
-    // Positional arguments, in the order the Space's /generate_video endpoint declares them.
+    // Positional arguments for the LTX-2.3 style /generate_video endpoint.
     var payload = new
     {
         data = new object?[]
         {
-            startingFrame,
+            null,               // first_frame
+            null,               // end_frame
             prompt,
-            6,                      // steps
-            "blurry, distorted, static, low quality",
             durationSeconds,
-            1,                      // guidance_scale
-            1,                      // guidance_scale_2
-            42,                     // seed
-            true,                   // randomize_seed
+            "Text-to-Video",    // generation_mode
+            false,              // enhance_prompt
+            42,                 // seed
+            true,               // randomize_seed
+            512,                // height
+            768,                // width
+            null,               // audio_path
         },
+        fn_index = functionIndex,
+        session_hash = sessionHash,
     };
 
-    using HttpRequestMessage submit = new(HttpMethod.Post, spaceHost + endpoint)
+    using HttpRequestMessage join = new(HttpMethod.Post, $"{spaceHost}/gradio_api/queue/join")
     {
         Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
     };
-    submit.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
+    join.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
 
-    using HttpResponseMessage submitResponse = await httpClient.SendAsync(submit);
-    await EnsureSuccessAsync(submitResponse);
+    using HttpResponseMessage joinResponse = await httpClient.SendAsync(join);
+    await EnsureSuccessAsync(joinResponse);
 
-    string submitBody = await submitResponse.Content.ReadAsStringAsync();
-    string eventId = JsonDocument.Parse(submitBody).RootElement.GetProperty("event_id").GetString()
-        ?? throw new InvalidOperationException("Hugging Face did not return an event id.");
-
-    string videoUrl = await ReadGradioResultUrlAsync(httpClient, $"{spaceHost}{endpoint}/{eventId}", hfToken);
+    string videoRef = await ReadQueueResultAsync(httpClient, $"{spaceHost}/gradio_api/queue/data?session_hash={sessionHash}", hfToken);
+    string videoUrl = videoRef.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+        ? videoRef
+        : $"{spaceHost}/gradio_api/file={videoRef}";
 
     using HttpRequestMessage download = new(HttpMethod.Get, videoUrl);
     download.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
@@ -166,8 +169,45 @@ static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string p
     return fileName;
 }
 
-// Gradio streams progress as server-sent events and ends with either "complete" or "error".
-static async Task<string> ReadGradioResultUrlAsync(HttpClient httpClient, string streamUrl, string hfToken)
+// "owner/Space_Name" is served from "owner-space-name.hf.space".
+static string ToSpaceSubdomain(string space)
+{
+    StringBuilder builder = new(space.Length);
+    foreach (char c in space)
+    {
+        builder.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '-');
+    }
+
+    return builder.ToString();
+}
+
+// queue/join wants a numeric fn_index, which the Space's config maps from the api_name.
+static async Task<int> ResolveFunctionIndexAsync(HttpClient httpClient, string spaceHost, string apiName)
+{
+    using HttpResponseMessage response = await httpClient.GetAsync($"{spaceHost}/config");
+    await EnsureSuccessAsync(response);
+
+    using JsonDocument config = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+    if (config.RootElement.TryGetProperty("dependencies", out JsonElement dependencies))
+    {
+        foreach (JsonElement dependency in dependencies.EnumerateArray())
+        {
+            if (dependency.TryGetProperty("api_name", out JsonElement name)
+                && name.ValueKind == JsonValueKind.String
+                && string.Equals(name.GetString(), apiName, StringComparison.Ordinal)
+                && dependency.TryGetProperty("id", out JsonElement id)
+                && id.TryGetInt32(out int index))
+            {
+                return index;
+            }
+        }
+    }
+
+    throw new InvalidOperationException($"the Space does not expose a '{apiName}' endpoint.");
+}
+
+// The queue stream emits one JSON object per "data:" line until the job finishes.
+static async Task<string> ReadQueueResultAsync(HttpClient httpClient, string streamUrl, string hfToken)
 {
     using HttpRequestMessage request = new(HttpMethod.Get, streamUrl);
     request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
@@ -176,64 +216,77 @@ static async Task<string> ReadGradioResultUrlAsync(HttpClient httpClient, string
     await EnsureSuccessAsync(response);
 
     using StreamReader reader = new(await response.Content.ReadAsStreamAsync());
-    string? currentEvent = null;
-
     while (await reader.ReadLineAsync() is { } line)
     {
-        if (line.StartsWith("event:", StringComparison.Ordinal))
-        {
-            currentEvent = line["event:".Length..].Trim();
-            continue;
-        }
-
         if (!line.StartsWith("data:", StringComparison.Ordinal))
         {
             continue;
         }
 
-        string data = line["data:".Length..].Trim();
+        using JsonDocument message = JsonDocument.Parse(line["data:".Length..].Trim());
+        JsonElement root = message.RootElement;
+        string? kind = root.TryGetProperty("msg", out JsonElement msg) ? msg.GetString() : null;
 
-        if (currentEvent == "error")
+        if (kind == "estimation" && root.TryGetProperty("rank", out JsonElement rank) && rank.TryGetInt32(out int position) && position > 0)
         {
-            throw new InvalidOperationException(
-                data is "null" or ""
-                    ? "the Space rejected the request (most often an expired token or exhausted free ZeroGPU quota)"
-                    : data);
+            Console.WriteLine($"Queued on ZeroGPU (position {position})...");
+            continue;
         }
 
-        if (currentEvent == "complete")
+        if (kind != "process_completed")
         {
-            return ExtractVideoUrl(data);
+            continue;
         }
+
+        bool success = root.TryGetProperty("success", out JsonElement ok) && ok.ValueKind == JsonValueKind.True;
+        root.TryGetProperty("output", out JsonElement output);
+
+        if (!success)
+        {
+            string? error = output.ValueKind == JsonValueKind.Object
+                && output.TryGetProperty("error", out JsonElement errorElement)
+                    ? errorElement.GetString()
+                    : null;
+
+            throw new InvalidOperationException(error ?? "the Space reported a failure without a message.");
+        }
+
+        return ExtractVideoRef(output);
     }
 
     throw new InvalidOperationException("the Space closed the stream without returning a video.");
 }
 
-static string ExtractVideoUrl(string completeEventData)
+static string ExtractVideoRef(JsonElement output)
 {
-    JsonElement root = JsonDocument.Parse(completeEventData).RootElement;
-    if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+    if (output.ValueKind == JsonValueKind.Object
+        && output.TryGetProperty("data", out JsonElement data)
+        && data.ValueKind == JsonValueKind.Array
+        && data.GetArrayLength() > 0)
     {
-        throw new InvalidOperationException($"unexpected response from the Space: {completeEventData}");
-    }
+        JsonElement first = data[0];
 
-    JsonElement first = root[0];
-    if (first.ValueKind == JsonValueKind.Object)
-    {
-        // Newer Spaces nest the file under "video"; older ones return it directly.
-        if (first.TryGetProperty("video", out JsonElement nested) && nested.ValueKind == JsonValueKind.Object)
+        // Spaces return either a bare file object or one nested under "video".
+        if (first.ValueKind == JsonValueKind.Object
+            && first.TryGetProperty("video", out JsonElement nested)
+            && nested.ValueKind == JsonValueKind.Object)
         {
             first = nested;
         }
 
-        if (first.TryGetProperty("url", out JsonElement url) && url.GetString() is { Length: > 0 } urlValue)
+        if (first.ValueKind == JsonValueKind.Object)
         {
-            return urlValue;
+            foreach (string key in new[] { "url", "path" })
+            {
+                if (first.TryGetProperty(key, out JsonElement value) && value.GetString() is { Length: > 0 } reference)
+                {
+                    return reference;
+                }
+            }
         }
     }
 
-    throw new InvalidOperationException($"could not find a video URL in the response: {completeEventData}");
+    throw new InvalidOperationException($"could not find a video in the response: {output}");
 }
 
 // Paid fallback: gen.pollinations.ai charges Pollen credits per clip.
