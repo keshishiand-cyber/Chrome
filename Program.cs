@@ -86,13 +86,18 @@ while (true)
                 ImageGenerationOptions options = new()
                 {
                     Size = GeneratedImageSize.W1024xH1024,
-                    ResponseFormat = GeneratedImageFormat.Bytes,
                 };
 
                 GeneratedImage image = imageClient.GenerateImage(imagePrompt, options);
                 string fileName = $"image-{DateTime.Now:yyyyMMdd-HHmmss}.png";
-                File.WriteAllBytes(fileName, image.ImageBytes.ToArray());
-                Console.WriteLine($"Saved to {fileName}");
+
+                // Download image from URL
+                using (var downloadClient = new HttpClient())
+                {
+                    byte[] imageData = await downloadClient.GetByteArrayAsync(image.ImageUri);
+                    File.WriteAllBytes(fileName, imageData);
+                    Console.WriteLine($"Saved to {fileName}");
+                }
             }
             else if (currentImageModel == "@cf/stabilityai/stable-diffusion-xl-base-1.0")
             {
