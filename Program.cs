@@ -13,7 +13,6 @@ if (string.IsNullOrEmpty(apiKey))
 using HttpClient httpClient = new();
 httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
-const string HuggingFaceModel = "MiniMaxAI/MiniMax-M3";
 const string HuggingFaceApiUrl = "https://api-inference.huggingface.co/models/MiniMaxAI/MiniMax-M3";
 
 Console.WriteLine("Chat with MiniMax-M3 via HuggingFace (type 'exit' to quit)");
@@ -44,7 +43,7 @@ while (true)
 
         if (response.IsSuccessStatusCode)
         {
-            var result = await response.Content.ReadAsAsync<List<HuggingFaceResponse>>();
+            var result = await response.Content.ReadFromJsonAsync<List<HuggingFaceResponse>>();
             if (result != null && result.Count > 0)
             {
                 string assistantMessage = result[0].GeneratedText;
