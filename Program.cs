@@ -108,37 +108,48 @@ static async Task<string> GenerateFreeImageAsync(HttpClient httpClient, string p
     return fileName;
 }
 
-// Free text-to-video on Hugging Face's ZeroGPU tier. No payment is ever involved, but
+// Free video on Hugging Face's ZeroGPU tier. Pollinations paints the opening frame for
+// free, then the Wan 2.2 image-to-video Space animates it. No payment is involved, but
 // ZeroGPU rejects anonymous API calls, so a free HF token is required.
 //
-// This talks Gradio's queue protocol (/queue/join + /queue/data) rather than the simpler
-// /gradio_api/call/ REST route, because the REST route reports every failure as a bare
-// "null" while the queue stream carries the real message — including the ZeroGPU quota
-// notice that says how long until your allowance refills.
-static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string prompt, string hfToken, double durationSeconds = 6.0)
+// Two details matter for staying inside the free tier:
+//   * The clip is deliberately short and low-step. ZeroGPU sizes its GPU reservation from
+//     these values, and a free account cannot reserve the 200s+ that a full-length
+//     text-to-video model asks for — such requests are refused outright.
+//   * The frame is uploaded to the Space rather than handed over as a URL. The Space
+//     fails to fetch remote URLs itself and reports it only as an opaque app error.
+static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string prompt, string hfToken, double durationSeconds = 1.5, int steps = 4)
 {
-    string space = Environment.GetEnvironmentVariable("HF_VIDEO_SPACE") ?? "JoseAQ/Video_Action";
+    string space = Environment.GetEnvironmentVariable("HF_VIDEO_SPACE") ?? "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
     string spaceHost = $"https://{ToSpaceSubdomain(space)}.hf.space";
+
+    Console.WriteLine("Painting the opening frame...");
+    byte[] frame = await httpClient.GetByteArrayAsync(BuildPollinationsImageUrl(prompt, 832, 480));
+    string framePath = await UploadToSpaceAsync(httpClient, spaceHost, hfToken, frame);
 
     int functionIndex = await ResolveFunctionIndexAsync(httpClient, spaceHost, "generate_video");
     string sessionHash = Guid.NewGuid().ToString("n")[..12];
 
-    // Positional arguments for the LTX-2.3 style /generate_video endpoint.
+    var uploadedFrame = new Dictionary<string, object?>
+    {
+        ["path"] = framePath,
+        ["meta"] = new Dictionary<string, string> { ["_type"] = "gradio.FileData" },
+    };
+
+    // Positional arguments, in the order the Space's generate_video endpoint declares them.
     var payload = new
     {
         data = new object?[]
         {
-            null,               // first_frame
-            null,               // end_frame
+            uploadedFrame,
             prompt,
+            steps,
+            "blurry, distorted, low quality",
             durationSeconds,
-            "Text-to-Video",    // generation_mode
-            false,              // enhance_prompt
-            42,                 // seed
-            true,               // randomize_seed
-            512,                // height
-            768,                // width
-            null,               // audio_path
+            1,      // guidance_scale
+            1,      // guidance_scale_2
+            42,     // seed
+            true,   // randomize_seed
         },
         fn_index = functionIndex,
         session_hash = sessionHash,
@@ -153,6 +164,7 @@ static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string p
     using HttpResponseMessage joinResponse = await httpClient.SendAsync(join);
     await EnsureSuccessAsync(joinResponse);
 
+    Console.WriteLine("Animating it on ZeroGPU...");
     string videoRef = await ReadQueueResultAsync(httpClient, $"{spaceHost}/gradio_api/queue/data?session_hash={sessionHash}", hfToken);
     string videoUrl = videoRef.StartsWith("http", StringComparison.OrdinalIgnoreCase)
         ? videoRef
@@ -167,6 +179,31 @@ static async Task<string> GenerateFreeVideoAsync(HttpClient httpClient, string p
     string fileName = $"video-{DateTime.Now:yyyyMMdd-HHmmss}.mp4";
     await File.WriteAllBytesAsync(fileName, videoBytes);
     return fileName;
+}
+
+// Hands the frame to the Space's own file store and returns the server-side path.
+static async Task<string> UploadToSpaceAsync(HttpClient httpClient, string spaceHost, string hfToken, byte[] frame)
+{
+    using MultipartFormDataContent form = new();
+    ByteArrayContent file = new(frame);
+    file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+    form.Add(file, "files", "frame.jpg");
+
+    using HttpRequestMessage request = new(HttpMethod.Post, $"{spaceHost}/gradio_api/upload") { Content = form };
+    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
+
+    using HttpResponseMessage response = await httpClient.SendAsync(request);
+    await EnsureSuccessAsync(response);
+
+    using JsonDocument uploaded = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+    if (uploaded.RootElement.ValueKind == JsonValueKind.Array
+        && uploaded.RootElement.GetArrayLength() > 0
+        && uploaded.RootElement[0].GetString() is { Length: > 0 } path)
+    {
+        return path;
+    }
+
+    throw new InvalidOperationException("the Space did not accept the opening frame.");
 }
 
 // "owner/Space_Name" is served from "owner-space-name.hf.space".
