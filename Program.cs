@@ -1,19 +1,24 @@
-#pragma warning disable OPENAI001 // Image generation options are marked experimental by the SDK.
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
-using OpenAI.Chat;
-using OpenAI.Images;
-
-string? apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+string? apiKey = Environment.GetEnvironmentVariable("HUGGINGFACE_API_KEY");
 if (string.IsNullOrEmpty(apiKey))
 {
-    Console.WriteLine("Set the OPENAI_API_KEY environment variable before running this app.");
+    Console.WriteLine("Set the HUGGINGFACE_API_KEY environment variable before running this app.");
+    Console.WriteLine("Get your API key from: https://huggingface.co/settings/tokens");
     return;
 }
 
-ChatClient chatClient = new(model: "gpt-4o-mini", apiKey: apiKey);
-ImageClient imageClient = new(model: "dall-e-3", apiKey: apiKey);
+using HttpClient httpClient = new();
+httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
-Console.WriteLine("Chat with OpenAI (type 'exit' to quit, or '/image <prompt>' to generate an image)");
+const string HuggingFaceModel = "MiniMaxAI/MiniMax-M3";
+const string HuggingFaceApiUrl = "https://api-inference.huggingface.co/models/MiniMaxAI/MiniMax-M3";
+
+Console.WriteLine("Chat with MiniMax-M3 via HuggingFace (type 'exit' to quit)");
+List<Message> conversationHistory = [];
+
 while (true)
 {
     Console.Write("> ");
@@ -23,22 +28,71 @@ while (true)
         break;
     }
 
-    if (input.StartsWith("/image ", StringComparison.OrdinalIgnoreCase))
+    // Add user message to history
+    conversationHistory.Add(new Message { Role = "user", Content = input });
+
+    try
     {
-        string imagePrompt = input["/image ".Length..];
-        ImageGenerationOptions options = new()
+        // Prepare request for MiniMax-M3
+        var request = new HuggingFaceRequest
         {
-            Size = GeneratedImageSize.W1024xH1024,
-            ResponseFormat = GeneratedImageFormat.Bytes,
+            Inputs = input,
+            Parameters = new Parameters { MaxNewTokens = 512 }
         };
 
-        GeneratedImage image = imageClient.GenerateImage(imagePrompt, options);
-        string fileName = $"image-{DateTime.Now:yyyyMMdd-HHmmss}.png";
-        File.WriteAllBytes(fileName, image.ImageBytes.ToArray());
-        Console.WriteLine($"Saved to {fileName}");
-        continue;
-    }
+        var response = await httpClient.PostAsJsonAsync(HuggingFaceApiUrl, request);
 
-    ChatCompletion completion = chatClient.CompleteChat(input);
-    Console.WriteLine(completion.Content[0].Text);
+        if (response.IsSuccessStatusCode)
+        {
+            var result = await response.Content.ReadAsAsync<List<HuggingFaceResponse>>();
+            if (result != null && result.Count > 0)
+            {
+                string assistantMessage = result[0].GeneratedText;
+                Console.WriteLine(assistantMessage);
+
+                // Add assistant response to history
+                conversationHistory.Add(new Message { Role = "assistant", Content = assistantMessage });
+            }
+        }
+        else
+        {
+            string errorContent = await response.Content.ReadAsStringAsync();
+            Console.WriteLine($"Error: {response.StatusCode} - {errorContent}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error calling MiniMax-M3: {ex.Message}");
+    }
+}
+
+// Models for HuggingFace API
+class HuggingFaceRequest
+{
+    [JsonPropertyName("inputs")]
+    public string? Inputs { get; set; }
+
+    [JsonPropertyName("parameters")]
+    public Parameters? Parameters { get; set; }
+}
+
+class Parameters
+{
+    [JsonPropertyName("max_new_tokens")]
+    public int MaxNewTokens { get; set; } = 256;
+
+    [JsonPropertyName("temperature")]
+    public float Temperature { get; set; } = 0.7f;
+}
+
+class HuggingFaceResponse
+{
+    [JsonPropertyName("generated_text")]
+    public string? GeneratedText { get; set; }
+}
+
+class Message
+{
+    public string? Role { get; set; }
+    public string? Content { get; set; }
 }
