@@ -40,7 +40,7 @@ while (true)
         string imagePrompt = input["/image ".Length..];
         try
         {
-            string fileName = await GenerateFreeImageAsync(httpClient, imagePrompt);
+            string fileName = await GeneratePollinationsImageAsync(httpClient, imagePrompt, pollinationsApiKey);
             Console.WriteLine($"Saved to {fileName}");
         }
         catch (Exception ex)
@@ -119,13 +119,44 @@ static string BuildPollinationsImageUrl(string prompt, int width, int height)
     return $"https://image.pollinations.ai/prompt/{encodedPrompt}?width={width}&height={height}&nologo=true";
 }
 
-static async Task<string> GenerateFreeImageAsync(HttpClient httpClient, string prompt, int width = 1024, int height = 1024)
+// Pollinations serves images from two endpoints. The legacy one is free and needs no key,
+// but only offers Sana. The newer gen.pollinations.ai carries the rest of the catalogue --
+// flux (FLUX.1-schnell), zimage, krea, qwen-image and so on -- and bills Pollen per image,
+// cheaply: flux is 0.002 Pollen, roughly five hundred images per Pollen.
+//
+// A key is therefore an upgrade rather than a requirement: supply one and /image uses the
+// better model, leave it out and it stays free.
+static async Task<string> GeneratePollinationsImageAsync(HttpClient httpClient, string prompt, string? apiKey, int width = 1024, int height = 1024)
 {
-    using HttpResponseMessage response = await httpClient.GetAsync(BuildPollinationsImageUrl(prompt, width, height));
-    response.EnsureSuccessStatusCode();
+    bool paid = !string.IsNullOrEmpty(apiKey);
+    string model = Environment.GetEnvironmentVariable("POLLINATIONS_IMAGE_MODEL") ?? "flux";
+
+    string url = paid
+        ? $"https://gen.pollinations.ai/image/{Uri.EscapeDataString(prompt)}?model={model}&width={width}&height={height}"
+        : BuildPollinationsImageUrl(prompt, width, height);
+
+    Console.WriteLine(paid
+        ? $"Generating with '{model}' on gen.pollinations.ai (costs Pollen)..."
+        : "Generating with Sana on the free Pollinations endpoint...");
+
+    using HttpRequestMessage request = new(HttpMethod.Get, url);
+    if (paid)
+    {
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+    }
+
+    using HttpResponseMessage response = await httpClient.SendAsync(request);
+    await EnsureSuccessAsync(response);
 
     byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
-    string fileName = $"image-{DateTime.Now:yyyyMMdd-HHmmss}.jpg";
+    string extension = response.Content.Headers.ContentType?.MediaType switch
+    {
+        "image/png" => ".png",
+        "image/webp" => ".webp",
+        _ => ".jpg",
+    };
+
+    string fileName = $"image-{DateTime.Now:yyyyMMdd-HHmmss}{extension}";
     await File.WriteAllBytesAsync(fileName, imageBytes);
     return fileName;
 }

@@ -5,26 +5,37 @@ using free generation backends wherever one genuinely exists.
 
 ## Setup
 
-### Images — two options
+### Images — three options
 
-`/image <prompt>` uses the unauthenticated [Pollinations.ai](https://pollinations.ai) API.
-No signup, no key, no cost, no practical limit — it works with no environment variables
-set. It currently serves the Sana model.
+`/image <prompt>` with no keys set uses the legacy, unauthenticated
+[Pollinations](https://pollinations.ai) endpoint (`image.pollinations.ai`). No signup, no
+key, no cost, no practical limit. That endpoint only offers one model, Sana.
+
+Set `POLLINATIONS_API_KEY` and `/image` switches to `gen.pollinations.ai`, which carries
+the full catalogue — `flux` (FLUX.1-schnell), `zimage`, `krea`, `qwen-image`,
+`nanobanana` and more. This bills Pollen, but very little: flux is **0.002 Pollen per
+image**, roughly five hundred images per Pollen. Pick the model with:
+
+```
+export POLLINATIONS_IMAGE_MODEL=zimage   # default: flux
+```
+
+Get a key at [enter.pollinations.ai/keys](https://enter.pollinations.ai/keys). A zero
+balance fails clearly rather than silently:
+
+```
+Image generation failed: 402 ... This request costs ~0.0020 pollen,
+but your available balance is 0.0000.
+```
 
 `/flux <prompt>` runs [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
-on Black Forest Labs' own [ZeroGPU Space](https://huggingface.co/spaces/black-forest-labs/FLUX.1-schnell)
-for noticeably better prompt adherence and detail. It needs the same free `HF_TOKEN` as
-video (see below) and draws on the free ZeroGPU allowance.
+on Black Forest Labs' own [ZeroGPU Space](https://huggingface.co/spaces/black-forest-labs/FLUX.1-schnell).
+Same model as Pollinations' `flux`, but paid for with the free `HF_TOKEN` ZeroGPU
+allowance instead of Pollen — so it needs no balance at all.
 
-Note that FLUX.1-schnell is *also* offered through Hugging Face's Inference Providers, but
-that route bills third-party providers (nscale, fal-ai, wavespeed) against your monthly
-inference credit — a free account is depleted after roughly a single image:
-
-```
-402: You have depleted your monthly included credits.
-```
-
-The app deliberately uses the Space instead, which the free ZeroGPU allowance covers.
+Avoid routing FLUX.1-schnell through Hugging Face's Inference Providers: that path bills
+third-party providers against your monthly inference credit, which a free account exhausts
+after roughly a single image (`402: You have depleted your monthly included credits`).
 
 ### Video — free, with a free Hugging Face token
 
