@@ -5,11 +5,26 @@ using free generation backends wherever one genuinely exists.
 
 ## Setup
 
-### Images — free, no key at all
+### Images — two options
 
-`/image <prompt>` uses the unauthenticated
-[Pollinations.ai](https://pollinations.ai) image API. No signup, no key, no cost, no
-practical limit. Works with no environment variables set.
+`/image <prompt>` uses the unauthenticated [Pollinations.ai](https://pollinations.ai) API.
+No signup, no key, no cost, no practical limit — it works with no environment variables
+set. It currently serves the Sana model.
+
+`/flux <prompt>` runs [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
+on Black Forest Labs' own [ZeroGPU Space](https://huggingface.co/spaces/black-forest-labs/FLUX.1-schnell)
+for noticeably better prompt adherence and detail. It needs the same free `HF_TOKEN` as
+video (see below) and draws on the free ZeroGPU allowance.
+
+Note that FLUX.1-schnell is *also* offered through Hugging Face's Inference Providers, but
+that route bills third-party providers (nscale, fal-ai, wavespeed) against your monthly
+inference credit — a free account is depleted after roughly a single image:
+
+```
+402: You have depleted your monthly included credits.
+```
+
+The app deliberately uses the Space instead, which the free ZeroGPU allowance covers.
 
 ### Video — free, with a free Hugging Face token
 
@@ -61,5 +76,5 @@ account receives only about 1.5 Pollen/week. Treat it as a paid path.
 dotnet run
 ```
 
-Type a message to chat, `/image <prompt>` to generate an image, `/video <prompt>` to
+Type a message to chat, `/image <prompt>` or `/flux <prompt>` to generate an image, `/video <prompt>` to
 generate a video, or `exit` to quit. Output files are written to the current directory.

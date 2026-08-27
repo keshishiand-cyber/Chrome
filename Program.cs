@@ -25,7 +25,7 @@ if (string.IsNullOrEmpty(hfToken) && string.IsNullOrEmpty(pollinationsApiKey))
     Console.WriteLine("No video backend configured. For free video, create a token at https://huggingface.co/settings/tokens and set HF_TOKEN.");
 }
 
-Console.WriteLine("Type '/image <prompt>', '/video <prompt>', a chat message, or 'exit'.");
+Console.WriteLine("Type '/image <prompt>' (free), '/flux <prompt>' (higher quality), '/video <prompt>', a chat message, or 'exit'.");
 while (true)
 {
     Console.Write("> ");
@@ -46,6 +46,28 @@ while (true)
         catch (Exception ex)
         {
             Console.WriteLine($"Image generation failed: {ex.Message}");
+        }
+        continue;
+    }
+
+    if (input.StartsWith("/flux ", StringComparison.OrdinalIgnoreCase))
+    {
+        if (string.IsNullOrEmpty(hfToken))
+        {
+            Console.WriteLine("/flux needs a free token from https://huggingface.co/settings/tokens set as HF_TOKEN. Plain /image needs no key.");
+            continue;
+        }
+
+        string fluxPrompt = input["/flux ".Length..];
+        try
+        {
+            Console.WriteLine("Generating with FLUX.1-schnell on ZeroGPU...");
+            string fileName = await GenerateFluxImageAsync(httpClient, fluxPrompt, hfToken);
+            Console.WriteLine($"Saved to {fileName}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"FLUX generation failed: {ex.Message}");
         }
         continue;
     }
@@ -104,6 +126,52 @@ static async Task<string> GenerateFreeImageAsync(HttpClient httpClient, string p
 
     byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
     string fileName = $"image-{DateTime.Now:yyyyMMdd-HHmmss}.jpg";
+    await File.WriteAllBytesAsync(fileName, imageBytes);
+    return fileName;
+}
+
+// Higher-fidelity images from FLUX.1-schnell, run on Black Forest Labs' own ZeroGPU Space.
+// Routing the same model through Hugging Face's Inference Providers instead would bill
+// third-party providers against the account's monthly credit, which a free account
+// exhausts in about one image; the Space is covered by the free ZeroGPU allowance.
+static async Task<string> GenerateFluxImageAsync(HttpClient httpClient, string prompt, string hfToken, int width = 1024, int height = 1024, int steps = 4)
+{
+    const string space = "black-forest-labs/FLUX.1-schnell";
+    string spaceHost = $"https://{ToSpaceSubdomain(space)}.hf.space";
+
+    int functionIndex = await ResolveFunctionIndexAsync(httpClient, spaceHost, "infer");
+    string sessionHash = Guid.NewGuid().ToString("n")[..12];
+
+    // Positional arguments, in the order the Space's infer endpoint declares them.
+    var payload = new
+    {
+        data = new object?[] { prompt, 0, true, width, height, steps },
+        fn_index = functionIndex,
+        session_hash = sessionHash,
+    };
+
+    using HttpRequestMessage join = new(HttpMethod.Post, $"{spaceHost}/gradio_api/queue/join")
+    {
+        Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+    };
+    join.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
+
+    using HttpResponseMessage joinResponse = await httpClient.SendAsync(join);
+    await EnsureSuccessAsync(joinResponse);
+
+    string imageRef = await ReadQueueResultAsync(httpClient, $"{spaceHost}/gradio_api/queue/data?session_hash={sessionHash}", hfToken);
+    string imageUrl = imageRef.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+        ? imageRef
+        : $"{spaceHost}/gradio_api/file={imageRef}";
+
+    using HttpRequestMessage download = new(HttpMethod.Get, imageUrl);
+    download.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
+    using HttpResponseMessage imageResponse = await httpClient.SendAsync(download);
+    await EnsureSuccessAsync(imageResponse);
+
+    string extension = Path.GetExtension(new Uri(imageUrl).AbsolutePath) is { Length: > 1 } ext ? ext : ".webp";
+    byte[] imageBytes = await imageResponse.Content.ReadAsByteArrayAsync();
+    string fileName = $"flux-{DateTime.Now:yyyyMMdd-HHmmss}{extension}";
     await File.WriteAllBytesAsync(fileName, imageBytes);
     return fileName;
 }
@@ -288,13 +356,13 @@ static async Task<string> ReadQueueResultAsync(HttpClient httpClient, string str
             throw new InvalidOperationException(error ?? "the Space reported a failure without a message.");
         }
 
-        return ExtractVideoRef(output);
+        return ExtractFileRef(output);
     }
 
     throw new InvalidOperationException("the Space closed the stream without returning a video.");
 }
 
-static string ExtractVideoRef(JsonElement output)
+static string ExtractFileRef(JsonElement output)
 {
     if (output.ValueKind == JsonValueKind.Object
         && output.TryGetProperty("data", out JsonElement data)
@@ -323,7 +391,7 @@ static string ExtractVideoRef(JsonElement output)
         }
     }
 
-    throw new InvalidOperationException($"could not find a video in the response: {output}");
+    throw new InvalidOperationException($"could not find a file in the response: {output}");
 }
 
 // Paid fallback: gen.pollinations.ai charges Pollen credits per clip.
